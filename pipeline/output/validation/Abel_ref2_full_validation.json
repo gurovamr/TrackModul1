@@ -1,0 +1,18 @@
+{
+  "model": "Abel_ref2",
+  "issues": [
+    "\u2717 Ascending Aorta: Pressure out of range",
+    "\u2717 R Internal Carotid: Pressure out of range",
+    "\u2717 L Internal Carotid: Pressure out of range",
+    "\u2717 R Middle Cerebral: Pressure out of range",
+    "\u2717 L Middle Cerebral: Pressure out of range"
+  ],
+  "validation_results": {
+    "periodicity": "PASS",
+    "pressure_ranges": "FAIL",
+    "pressure_summary": "               Vessel   ID  Systolic_mmHg  Diastolic_mmHg   Mean_mmHg  Pulse_mmHg  Valid\n0     Ascending Aorta   A1     867.383853      750.063755  838.565468  117.320097  False\n1  R Internal Carotid  A12     869.636369      750.063755  838.364929  119.572614  False\n2  L Internal Carotid  A16     870.049054      750.063755  838.100168  119.985299  False\n3   R Middle Cerebral  A70     865.779091      750.044749  834.818009  115.734342  False\n4   L Middle Cerebral  A73     864.995350      750.044524  834.188262  114.950826  False",
+    "negative_values": "PASS",
+    "oscillations": "PASS"
+  },
+  "timestamp": "2026-02-02T20:55:42.301938"
+}

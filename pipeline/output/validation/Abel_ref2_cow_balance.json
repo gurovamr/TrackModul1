@@ -1,0 +1,23 @@
+{
+  "model": "Abel_ref2",
+  "total_inflow_ml_min": 0.5837478992548986,
+  "total_outflow_ml_min": 0.31448861331938516,
+  "imbalance_ml_min": 0.2692592859355134,
+  "imbalance_percent": 46.12595373434295,
+  "status": "LARGE",
+  "explanation": "Significant peripheral leakage",
+  "inflow_vessels": {
+    "R-ICA": 0.25977729690805057,
+    "L-ICA": 0.23606296319346937,
+    "Basilar": 0.08790763915337858
+  },
+  "outflow_vessels": {
+    "R-MCA": 0.08067941669495235,
+    "L-MCA": 0.08008121558714654,
+    "R-ACA": 0.03911112575012788,
+    "L-ACA": 0.03901563369577433,
+    "R-PCA": 0.03781057263451035,
+    "L-PCA": 0.0377906489568737
+  },
+  "timestamp": "2026-02-02T20:55:41.565675"
+}

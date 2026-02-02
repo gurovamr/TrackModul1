@@ -1,0 +1,23 @@
+{
+  "model": "patient_025",
+  "total_inflow_ml_min": 0.610123850228586,
+  "total_outflow_ml_min": 0.3329093160666499,
+  "imbalance_ml_min": 0.27721453416193603,
+  "imbalance_percent": 45.43578063012554,
+  "status": "LARGE",
+  "explanation": "Significant peripheral leakage",
+  "inflow_vessels": {
+    "R-ICA": 0.3111449823964533,
+    "L-ICA": 0.2703187806843268,
+    "Basilar": 0.02866008714780586
+  },
+  "outflow_vessels": {
+    "R-MCA": 0.08303336413917661,
+    "L-MCA": 0.08280791175246732,
+    "R-ACA": 0.042796070981819104,
+    "L-ACA": 0.04281298549144302,
+    "R-PCA": 0.042681868133723544,
+    "L-PCA": 0.038777115568020326
+  },
+  "timestamp": "2026-02-02T20:55:17.465729"
+}

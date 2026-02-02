@@ -48,7 +48,7 @@ class SimulationValidator:
         
         data = self.load_vessel_data(vessel_id)
         if data is None:
-            self.issues.append(f"❌ Could not load {vessel_id}")
+            self.issues.append(f"[ERROR] Could not load {vessel_id}")
             return False
         
         time = data['time']
@@ -60,7 +60,7 @@ class SimulationValidator:
         peaks, _ = find_peaks(pressure, height=np.max(pressure)*0.8)
         
         if len(peaks) < 2:
-            self.issues.append(f"❌ Could not detect cardiac cycles in {vessel_id}")
+            self.issues.append(f"[ERROR] Could not detect cardiac cycles in {vessel_id}")
             return False
         
         # Calculate cycle duration
@@ -73,8 +73,8 @@ class SimulationValidator:
         print(f"Total Cycles Simulated: {n_total_cycles}")
         
         if n_total_cycles < 3:
-            self.issues.append(f"⚠️  Only {n_total_cycles} cycles - need at least 3 for validation")
-            print(f"⚠️  WARNING: Only {n_total_cycles} cycles simulated")
+            self.issues.append(f"[WARNING] Only {n_total_cycles} cycles - need at least 3 for validation")
+            print(f"[WARNING] Only {n_total_cycles} cycles simulated")
         
         # Extract last n_cycles for comparison
         if n_total_cycles >= n_cycles:
@@ -109,19 +109,19 @@ class SimulationValidator:
             # Check convergence criterion
             avg_rms = np.mean(rms_diffs)
             if avg_rms < 0.1:
-                print(f"\n✓ PASSED: Excellent periodicity (RMS < 0.1%)")
+                print(f"\n[PASS] Excellent periodicity (RMS < 0.1%)")
                 self.validation_results['periodicity'] = 'PASS'
             elif avg_rms < 1.0:
-                print(f"\n✓ PASSED: Good periodicity (RMS < 1%)")
+                print(f"\n[PASS] Good periodicity (RMS < 1%)")
                 self.validation_results['periodicity'] = 'PASS'
             else:
-                print(f"\n⚠️  WARNING: Poor periodicity (RMS = {avg_rms:.2f}%)")
+                print(f"\n[WARNING] Poor periodicity (RMS = {avg_rms:.2f}%)")
                 print(f"    Simulation may not be fully converged")
                 self.validation_results['periodicity'] = 'WARNING'
-                self.issues.append(f"⚠️  Poor periodicity: RMS={avg_rms:.2f}%")
+                self.issues.append(f"  Poor periodicity: RMS={avg_rms:.2f}%")
         
         else:
-            print(f"\n⚠️  Not enough cycles for periodicity check")
+            print(f"\n  Not enough cycles for periodicity check")
             self.validation_results['periodicity'] = 'INSUFFICIENT_DATA'
         
         return True
@@ -192,7 +192,7 @@ class SimulationValidator:
             print(f"{'='*70}")
         else:
             print(f"\n{'='*70}")
-            print("⚠️  WARNING: Some vessels have pressures outside normal range")
+            print("  WARNING: Some vessels have pressures outside normal range")
             print(f"{'='*70}")
         
         return all_valid
@@ -231,7 +231,7 @@ class SimulationValidator:
             # Some backflow during diastole is normal
             if mean_flow < -1e-6:  # Persistent negative mean flow
                 unexpected_negative_flow.append(vessel_id)
-                print(f"⚠️  {vessel_id}: Mean flow is negative ({mean_flow*60*1000:.2f} mL/min)")
+                print(f"  {vessel_id}: Mean flow is negative ({mean_flow*60*1000:.2f} mL/min)")
             elif min_flow < -1e-7:  # Diastolic backflow
                 print(f"ℹ️  {vessel_id}: Minor diastolic backflow detected (normal)")
         
@@ -239,7 +239,7 @@ class SimulationValidator:
             print(f"\n✓ PASSED: No unexpected negative pressures or flows")
             self.validation_results['negative_values'] = 'PASS'
         else:
-            print(f"\n⚠️  Issues found with negative values")
+            print(f"\n  Issues found with negative values")
             self.validation_results['negative_values'] = 'WARNING'
         
         return True
@@ -272,9 +272,9 @@ class SimulationValidator:
         print(f"  Max acceleration: {max_accel:.2e} Pa/s²")
         
         if max_accel > accel_threshold:
-            print(f"  ⚠️  High-frequency oscillations detected")
+            print(f"    High-frequency oscillations detected")
             self.validation_results['oscillations'] = 'WARNING'
-            self.issues.append("⚠️  Possible numerical oscillations")
+            self.issues.append("  Possible numerical oscillations")
         else:
             print(f"  ✓ No significant oscillations")
             self.validation_results['oscillations'] = 'PASS'
@@ -289,7 +289,7 @@ class SimulationValidator:
         print(f"  Max gradient:  {max_gradient:.2e} m³/s per timestep")
         
         if max_gradient > 100 * mean_gradient:
-            print(f"  ⚠️  Possible flow discontinuities")
+            print(f"    Possible flow discontinuities")
             self.validation_results['oscillations'] = 'WARNING'
         else:
             print(f"  ✓ Flow is smooth")
@@ -339,7 +339,7 @@ class SimulationValidator:
         elif balance_error < 15:
             print(f"  ✓ Acceptable mass conservation")
         else:
-            print(f"  ⚠️  Large imbalance - check peripheral resistances")
+            print(f"    Large imbalance - check peripheral resistances")
         
         return True
     
@@ -405,7 +405,7 @@ class SimulationValidator:
         
         for key, value in self.validation_results.items():
             if key != 'pressure_summary':
-                icon = "✓" if value == "PASS" else "⚠️" if value == "WARNING" else "ℹ️"
+                icon = "✓" if value == "PASS" else "" if value == "WARNING" else "ℹ️"
                 summary_text += f"{icon} {key.replace('_', ' ').title()}: {value}\n"
         
         summary_text += f"\n{'='*40}\n"
@@ -457,7 +457,7 @@ class SimulationValidator:
             print(f"\n✓✓✓ ALL CHECKS PASSED ✓✓✓")
             print(f"Simulation is valid and ready for analysis")
         else:
-            print(f"\n⚠️  SOME CHECKS FAILED OR HAVE WARNINGS")
+            print(f"\n  SOME CHECKS FAILED OR HAVE WARNINGS")
             print(f"Review issues before proceeding with analysis")
             print(f"\nIssues ({len(self.issues)}):")
             for issue in self.issues:
