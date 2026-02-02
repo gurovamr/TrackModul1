@@ -2,28 +2,48 @@
 """
 Patient-specific Circle of Willis geometry injection for first_blood (Abel_ref2 template).
 
-Fixes implemented (per your request)
-1) Delete synonym mapping (NO ACA->A1, NO PCA->P1)
-2) Normalize segment names + skip "whole vessel" labels when parts exist in raw data:
-     - If A1/A2 exist -> ignore ACA
-     - If P1/P2 exist -> ignore PCA
-     - If C6/C7 exist -> ignore ICA (and by default we do not inject ICA at all)
-   This is necessary because your raw features include both whole + parts. :contentReference[oaicite:3]{index=3}
-3) Variant occlusion:
-     - only use variants groups: anterior, posterior (absence flags)
-     - ignore fetal, fenestration groups (not "absence") :contentReference[oaicite:4]{index=4}
-     - measured geometry overrides variants (never occlude measured)
-4) No invented wall thickness: thickness columns are NOT overwritten.
+Run from:
+  <repo_root>/pipeline
 
-Run from: <repo_root>/pipeline
-Writes:     <repo_root>/models/patient_<pid>/
+Reads patient raw data from:
+  <repo_root>/data/
+    data/cow_features/{topcow_<modality>_<pid>.json | feature_<modality>_<pid>.json}
+    data/cow_nodes/{topcow_<modality>_<pid>.json | nodes_<modality>_<pid>.json}
+    data/cow_variants/{topcow_<modality>_<pid>.json | variant_<modality>_<pid>.json}  (optional)
+
+Creates:
+  <repo_root>/models/patient_<pid>/
+    - copies ALL template CSVs except arterial.csv
+    - writes generated arterial.csv
+    - modifications_log.csv
+    - missing_mapping_log.csv
+    - skipped_segments_log.csv
+    - unmapped_patient_keys_log.csv
+    - variant_ignored_keys_log.csv
+    - variant_conflicts_log.csv
+
+Design:
+- No invented wall thickness: thickness columns are NOT overwritten.
+- Side inference priority:
+    (1) explicit "R-" / "L-" hints from nodes JSON keys
+    (2) x-coordinate fallback
+- "Absent vessel policy" (BC-consistent):
+    * Only apply absence from variants["anterior"] and variants["posterior"] where value == False
+    * Ignore variants["fetal"] and variants["fenestration"] for absence decisions
+    * Never occlude if we measured that vessel ("measured beats variants")
+- Basilar (BA) split across A59 and A56 proportional to template lengths.
+
+Important:
+- We DO NOT map ACA->A1 or PCA->P1. Only map explicit canonical segments:
+    ICA, MCA, A1, A2, P1, P2, Pcom, Acom, BA.
+  This prevents accidental overwrites when both PCA and P1 exist in the raw data.
 """
 
 import argparse
 import json
 import shutil
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple, Any
 
 import numpy as np
 import pandas as pd
@@ -34,8 +54,8 @@ import pandas as pd
 # -------------------------
 
 def get_repo_root() -> Path:
-    # script expected in <repo_root>/pipeline/
-    return Path(__file__).resolve().parent.parent
+    pipeline_dir = Path(__file__).resolve().parent
+    return pipeline_dir.parent
 
 
 # -------------------------
@@ -66,17 +86,20 @@ def _walk_json(obj, on_dict=None, on_list=None, path=()):
 
 def find_patient_files(data_root: Path, pid: str) -> Tuple[str, Path, Path, Optional[Path]]:
     """
-    Supports:
+    Supports both:
       topcow_<modality>_<pid>.json
       feature_<modality>_<pid>.json / nodes_<modality>_<pid>.json / variant_<modality>_<pid>.json
     Preference: ct then mr
     """
     pid = str(pid).zfill(3)
+
     for modality in ["ct", "mr"]:
+        # topcow naming
         feat_a = data_root / "cow_features" / f"topcow_{modality}_{pid}.json"
         nods_a = data_root / "cow_nodes" / f"topcow_{modality}_{pid}.json"
         var_a  = data_root / "cow_variants" / f"topcow_{modality}_{pid}.json"
 
+        # legacy naming
         feat_b = data_root / "cow_features" / f"feature_{modality}_{pid}.json"
         nods_b = data_root / "cow_nodes" / f"nodes_{modality}_{pid}.json"
         var_b  = data_root / "cow_variants" / f"variant_{modality}_{pid}.json"
@@ -100,17 +123,34 @@ def find_patient_files(data_root: Path, pid: str) -> Tuple[str, Path, Path, Opti
 
 
 # -------------------------
-# Nodes + side inference
+# Nodes + side inference (STRONG)
 # -------------------------
 
-def flatten_nodes(nodes_json: Any) -> Tuple[Dict[int, np.ndarray], List[float], List[float]]:
+def flatten_nodes(nodes_json: Any):
     """
-    Collect dicts like {"id": ..., "coords": [x,y,z]}
-    Track explicit R-/L- hints if present in ancestor keys.
+    Collect dicts like {"id": ..., "coords": [x,y,z]}.
+    Also create node_id -> side_hint from ANY ancestor key containing 'R-' or 'L-'.
+
+    Returns:
+      id_to_xyz: dict[int] -> np.array([x,y,z])
+      node_side_hint: dict[int] -> 'R'|'L'
+      r_x, l_x: samples of x coords from explicit R/L hints (for x-sign fallback orientation)
     """
     id_to_xyz: Dict[int, np.ndarray] = {}
+    node_side_hint: Dict[int, str] = {}
     r_x: List[float] = []
     l_x: List[float] = []
+
+    def path_has_side(path) -> Optional[str]:
+        # Strongest: any key containing "R-" or "L-" (not just startswith)
+        for p in reversed(path):
+            if not isinstance(p, str):
+                continue
+            if "R-" in p:
+                return "R"
+            if "L-" in p:
+                return "L"
+        return None
 
     def on_dict(d, path):
         if "id" in d and "coords" in d:
@@ -121,41 +161,59 @@ def flatten_nodes(nodes_json: Any) -> Tuple[Dict[int, np.ndarray], List[float], 
                     xyz = np.array([float(coords[0]), float(coords[1]), float(coords[2])], dtype=float)
                     id_to_xyz[nid] = xyz
 
-                    # Only trust explicit "R-" / "L-" keys as strong hints
-                    side_hint = None
-                    for p in reversed(path):
-                        if isinstance(p, str):
-                            if p.startswith("R-"):
-                                side_hint = "R"
-                                break
-                            if p.startswith("L-"):
-                                side_hint = "L"
-                                break
-
-                    if side_hint == "R":
-                        r_x.append(float(xyz[0]))
-                    elif side_hint == "L":
-                        l_x.append(float(xyz[0]))
+                    sh = path_has_side(path)
+                    if sh in ("R", "L"):
+                        # If conflicting hints appear for the same id, drop hint (safer)
+                        if nid in node_side_hint and node_side_hint[nid] != sh:
+                            node_side_hint.pop(nid, None)
+                        else:
+                            node_side_hint[nid] = sh
+                            if sh == "R":
+                                r_x.append(float(xyz[0]))
+                            else:
+                                l_x.append(float(xyz[0]))
             except Exception:
                 return
 
     _walk_json(nodes_json, on_dict=on_dict)
-    return id_to_xyz, r_x, l_x
+    return id_to_xyz, node_side_hint, r_x, l_x
 
 
 def infer_right_is_positive_x(r_x: List[float], l_x: List[float]) -> bool:
-    if len(r_x) == 0 or len(l_x) == 0:
-        return True
-    return float(np.mean(r_x)) > float(np.mean(l_x))
+    # If we have explicit labels, infer orientation from their means (even if both negative)
+    if len(r_x) > 0 and len(l_x) > 0:
+        return float(np.mean(r_x)) > float(np.mean(l_x))
+    # Otherwise assume Right = +x
+    return True
 
 
 def side_from_endpoints(
     id_to_xyz: Dict[int, np.ndarray],
+    node_side_hint: Dict[int, str],
     start_id: int,
     end_id: int,
     right_is_positive_x: bool
 ) -> Optional[str]:
-    xs: List[float] = []
+    """
+    Priority:
+      1) explicit node_side_hint if available on endpoints
+      2) x-sign fallback using right_is_positive_x
+    """
+    # 1) explicit hint
+    hints = []
+    if start_id in node_side_hint:
+        hints.append(node_side_hint[start_id])
+    if end_id in node_side_hint:
+        hints.append(node_side_hint[end_id])
+
+    if hints:
+        if all(h == hints[0] for h in hints):
+            return hints[0]
+        # conflicting explicit hints -> unknown
+        return None
+
+    # 2) fallback to x sign
+    xs = []
     if start_id in id_to_xyz:
         xs.append(float(id_to_xyz[start_id][0]))
     if end_id in id_to_xyz:
@@ -174,12 +232,12 @@ def side_from_endpoints(
 
 def parse_patient_features(features_json: Any) -> List[Dict[str, Any]]:
     """
-    Find entries containing:
+    Find dict entries containing:
       - segment: {start, end}
       - length (mm)
       - radius: {mean} (mm)
 
-    Uses last non-numeric key from JSON path as raw_name.
+    Uses last non-numeric key from JSON path as raw_name (e.g. "P1", "A2", "Pcom"...).
     """
     segs: List[Dict[str, Any]] = []
 
@@ -214,7 +272,7 @@ def parse_patient_features(features_json: Any) -> List[Dict[str, Any]]:
 
         segs.append(
             {
-                "raw_name": raw_name,
+                "raw_name": raw_name.strip(),
                 "start_id": start_id,
                 "end_id": end_id,
                 "length_mm": length_mm,
@@ -226,73 +284,52 @@ def parse_patient_features(features_json: Any) -> List[Dict[str, Any]]:
     return segs
 
 
+# -------------------------
+# Name normalization (NO SYNONYMS)
+# -------------------------
+
+CANONICAL = {"A1", "A2", "Acom", "Pcom", "MCA", "BA", "P1", "P2", "ICA"}  # strict
+
 def normalize_segment_name(raw_name: str) -> str:
     """
-    Normalize to a conservative canonical vocabulary.
-    IMPORTANT: we keep ACA/PCA/ICA as-is (not mapped to A1/P1 etc) to avoid synonyms.
+    Strict normalization:
+    - Keep exact canonical tokens only.
+    - Minimal case/spacing normalization for Acom/Pcom/BA.
+    - Everything else is returned as-is (and will be unmapped/ignored).
     """
     name = str(raw_name).strip()
 
-    known = {
-        "A1", "A2", "Acom", "Pcom", "MCA", "BA", "P1", "P2",
-        "ACA", "PCA", "ICA", "C6", "C7"
-    }
-    if name in known:
+    if name in CANONICAL:
         return name
 
-    low = name.lower()
-    if low in {"basilar", "basilar artery"}:
-        return "BA"
-    if low in {"acom", "a-com", "anterior communicating", "anterior_comm"}:
+    low = name.lower().replace(" ", "")
+    if low == "acom":
         return "Acom"
-    if low in {"pcom", "p-com", "posterior communicating", "posterior_comm"}:
+    if low == "pcom":
         return "Pcom"
-    if low in {"middle cerebral", "middle_cerebral"}:
-        return "MCA"
-    if low in {"internal carotid", "internal_carotid"}:
-        return "ICA"
+    if low == "ba":
+        return "BA"
 
+    # Do NOT map PCA->P1 or ACA->A1 etc. (no synonym mapping)
     return name
 
 
-def compute_present_parts(segs: List[Dict[str, Any]]) -> Dict[str, bool]:
-    """
-    Detect whether the raw file contains 'parts' that make a 'whole' redundant.
-    This is purely data-driven (no biology needed).
-    """
-    present = set(normalize_segment_name(s["raw_name"]) for s in segs)
-
-    return {
-        "has_A_parts": ("A1" in present) or ("A2" in present),
-        "has_P_parts": ("P1" in present) or ("P2" in present),
-        "has_ICA_parts": ("C6" in present) or ("C7" in present),
-    }
-
-
-def should_skip_canon(canon: str, parts: Dict[str, bool]) -> bool:
-    """
-    Skip whole-vessel labels when parts exist in the raw data.
-    Your patient file includes both whole and parts (e.g., ACA + A1/A2). :contentReference[oaicite:5]{index=5}
-    """
-    if canon == "ACA" and parts["has_A_parts"]:
-        return True
-    if canon == "PCA" and parts["has_P_parts"]:
-        return True
-    if canon == "ICA" and parts["has_ICA_parts"]:
-        return True
-    return False
-
-
 # -------------------------
-# FirstBlood mapping (NO synonyms)
+# FirstBlood mapping (STRICT, NO SYNONYMS)
 # -------------------------
 
 def build_firstblood_mapping() -> Dict[Tuple[Optional[str], str], List[str]]:
     """
-    Mapping into Abel_ref2 IDs.
-    IMPORTANT: no synonym entries (no ACA/PCA mappings).
+    Abel_ref2 IDs for the segments we support.
+
+    NOTE:
+      - We map ONLY explicit CoW segments (no ACA/PCA synonym mapping).
+      - BA is split across A59 and A56.
     """
     return {
+        ("R", "ICA"): ["A12"],
+        ("L", "ICA"): ["A16"],
+
         ("R", "MCA"): ["A70"],
         ("L", "MCA"): ["A73"],
 
@@ -311,8 +348,6 @@ def build_firstblood_mapping() -> Dict[Tuple[Optional[str], str], List[str]]:
 
         (None, "Acom"): ["A77"],
         (None, "BA"): ["A59", "A56"],
-
-        # NOTE: ICA intentionally not injected by default
     }
 
 
@@ -320,39 +355,33 @@ def build_firstblood_mapping() -> Dict[Tuple[Optional[str], str], List[str]]:
 # Geometry injection helpers
 # -------------------------
 
-REQUIRED_ARTERIAL_COLUMNS = {
-    "ID",
-    "name",
-    "length[SI]",
-    "start_diameter[SI]",
-    "end_diameter[SI]",
-}
-
+REQUIRED_ARTERIAL_COLUMNS = {"ID", "name", "length[SI]", "start_diameter[SI]", "end_diameter[SI]"}
 
 def assert_arterial_schema(df: pd.DataFrame):
     missing = [c for c in REQUIRED_ARTERIAL_COLUMNS if c not in df.columns]
     if missing:
         raise ValueError(
-            "arterial.csv schema mismatch. Missing columns: "
-            + ", ".join(missing)
+            "arterial.csv schema mismatch. Missing columns: " + ", ".join(missing)
             + "\nAvailable columns: " + ", ".join(df.columns)
         )
 
 
-def apply_geometry(df_arterial: pd.DataFrame, fb_id: str, length_m: float, diameter_m: float) -> Optional[Dict[str, Any]]:
-    idxs = df_arterial.index[df_arterial["ID"] == fb_id].tolist()
+def apply_geometry(df: pd.DataFrame, fb_id: str, length_m: float, diameter_m: float) -> Optional[Dict[str, Any]]:
+    idxs = df.index[df["ID"] == fb_id].tolist()
     if not idxs:
         return None
     i = idxs[0]
 
-    old_length = float(df_arterial.loc[i, "length[SI]"])
-    old_d1 = float(df_arterial.loc[i, "start_diameter[SI]"])
-    old_d2 = float(df_arterial.loc[i, "end_diameter[SI]"])
-    name = str(df_arterial.loc[i, "name"])
+    old_length = float(df.loc[i, "length[SI]"])
+    old_d1 = float(df.loc[i, "start_diameter[SI]"])
+    old_d2 = float(df.loc[i, "end_diameter[SI]"])
+    name = str(df.loc[i, "name"])
 
-    df_arterial.loc[i, "length[SI]"] = float(length_m)
-    df_arterial.loc[i, "start_diameter[SI]"] = float(diameter_m)
-    df_arterial.loc[i, "end_diameter[SI]"] = float(diameter_m)
+    df.loc[i, "length[SI]"] = float(length_m)
+    df.loc[i, "start_diameter[SI]"] = float(diameter_m)
+    df.loc[i, "end_diameter[SI]"] = float(diameter_m)
+
+    # thickness untouched
 
     return {
         "Action": "inject",
@@ -367,29 +396,28 @@ def apply_geometry(df_arterial: pd.DataFrame, fb_id: str, length_m: float, diame
     }
 
 
-def split_length_by_template(df_arterial: pd.DataFrame, ids: List[str], total_length_m: float) -> List[float]:
+def split_length_by_template(df: pd.DataFrame, ids: List[str], total_length_m: float) -> List[float]:
     template_lengths = []
     for fb_id in ids:
-        idxs = df_arterial.index[df_arterial["ID"] == fb_id].tolist()
-        template_lengths.append(float(df_arterial.loc[idxs[0], "length[SI]"]) if idxs else 0.0)
+        idxs = df.index[df["ID"] == fb_id].tolist()
+        template_lengths.append(float(df.loc[idxs[0], "length[SI]"]) if idxs else 0.0)
     s = float(np.sum(template_lengths))
     if s <= 1e-12:
         return [total_length_m / len(ids) for _ in ids]
-    fracs = [tl / s for tl in template_lengths]
-    return [total_length_m * f for f in fracs]
+    return [total_length_m * (tl / s) for tl in template_lengths]
 
 
-def occlude_vessel(df_arterial: pd.DataFrame, fb_id: str, min_diameter_m: float) -> Optional[Dict[str, Any]]:
-    idxs = df_arterial.index[df_arterial["ID"] == fb_id].tolist()
+def occlude_vessel(df: pd.DataFrame, fb_id: str, min_diameter_m: float) -> Optional[Dict[str, Any]]:
+    idxs = df.index[df["ID"] == fb_id].tolist()
     if not idxs:
         return None
     i = idxs[0]
-    name = str(df_arterial.loc[i, "name"])
-    old_d1 = float(df_arterial.loc[i, "start_diameter[SI]"])
-    old_d2 = float(df_arterial.loc[i, "end_diameter[SI]"])
+    name = str(df.loc[i, "name"])
+    old_d1 = float(df.loc[i, "start_diameter[SI]"])
+    old_d2 = float(df.loc[i, "end_diameter[SI]"])
 
-    df_arterial.loc[i, "start_diameter[SI]"] = float(min_diameter_m)
-    df_arterial.loc[i, "end_diameter[SI]"] = float(min_diameter_m)
+    df.loc[i, "start_diameter[SI]"] = float(min_diameter_m)
+    df.loc[i, "end_diameter[SI]"] = float(min_diameter_m)
 
     return {
         "Action": "occlude_absent",
@@ -403,50 +431,83 @@ def occlude_vessel(df_arterial: pd.DataFrame, fb_id: str, min_diameter_m: float)
 
 
 # -------------------------
-# Variants -> absent vessel keys
+# Variant parsing -> absent vessel keys (STRICT + SAFE)
 # -------------------------
 
-def extract_absent_variant_keys(variants_json: Any) -> List[Tuple[Optional[str], str]]:
+VARIANT_ALLOWED_NAMES = {"A1", "A2", "Acom", "Pcom", "P1", "P2", "ICA", "MCA", "BA"}
+VARIANT_ABSENCE_GROUPS = {"anterior", "posterior"}  # ONLY these are treated as present/absent
+
+def extract_absent_variant_keys(variants_json: Any) -> Tuple[List[Tuple[Optional[str], str]], List[Dict[str, Any]]]:
     """
-    Only interpret variants groups anterior/posterior as "absence".
-    Ignore fetal/fenestration (not absence in your file). :contentReference[oaicite:6]{index=6}
-    Keys returned in (side, canon) form compatible with fb_map.
+    Returns:
+      absent_keys: list of (side, canon) where canon is in VARIANT_ALLOWED_NAMES
+      ignored: list of logs for keys ignored (unknown groups, unknown labels, etc.)
+
+    Rules:
+      - ONLY groups in VARIANT_ABSENCE_GROUPS are used for absence (False => absent)
+      - fetal + fenestration are ignored for absence decisions
+      - keys like "3rd-A2" are ignored (not in Abel_ref2)
     """
     absent: List[Tuple[Optional[str], str]] = []
+    ignored: List[Dict[str, Any]] = []
+
     if not isinstance(variants_json, dict):
-        return absent
+        return absent, ignored
 
-    allowed_groups = {"anterior", "posterior"}  # only these are absence flags for your dataset
-
-    def parse_key(k: Any) -> Tuple[Optional[str], str]:
+    def parse_key(k: Any) -> Tuple[Optional[str], str, bool]:
+        """
+        Returns (side, canon, ok)
+        ok=False if canon not allowed or malformed.
+        """
         if not isinstance(k, str):
-            return (None, str(k))
+            return (None, str(k), False)
         ks = k.strip()
+
+        side: Optional[str] = None
+        name = ks
+
         if "-" in ks:
             s, n = ks.split("-", 1)
             s = s.strip()
             n = n.strip()
             if s in ("R", "L"):
-                return (s, normalize_segment_name(n))
-        return (None, normalize_segment_name(ks))
+                side = s
+                name = n
+            else:
+                # e.g. "3rd-A2" -> side not R/L
+                return (None, ks, False)
+
+        canon = normalize_segment_name(name)
+
+        if canon not in VARIANT_ALLOWED_NAMES:
+            return (side, canon, False)
+
+        return (side, canon, True)
 
     for group, blob in variants_json.items():
-        if group not in allowed_groups:
+        if group not in VARIANT_ABSENCE_GROUPS:
+            # ignored group (fetal/fenestration/etc.)
             continue
         if not isinstance(blob, dict):
             continue
+
         for k, present in blob.items():
+            # only treat explicit False as absent
             if present is False:
-                absent.append(parse_key(k))
+                side, canon, ok = parse_key(k)
+                if ok:
+                    absent.append((side, canon))
+                else:
+                    ignored.append({"group": group, "key": str(k), "reason": "ignored_absence_key_not_supported"})
 
     # de-dup
+    out = []
     seen = set()
-    uniq: List[Tuple[Optional[str], str]] = []
     for a in absent:
         if a not in seen:
-            uniq.append(a)
+            out.append(a)
             seen.add(a)
-    return uniq
+    return out, ignored
 
 
 # -------------------------
@@ -482,7 +543,7 @@ def main():
     modality, feature_path, nodes_path, variant_path = find_patient_files(data_root, pid)
 
     print("=" * 78)
-    print("PATIENT COW INJECTION (repo-relative)")
+    print("PATIENT COW INJECTION (STRICT, no synonyms)")
     print("=" * 78)
     print(f"repo_root:      {repo_root}")
     print(f"pid:            {pid}")
@@ -498,38 +559,29 @@ def main():
     nodes = load_json(nodes_path)
     variants = load_json(variant_path) if variant_path else None
 
-    id_to_xyz, r_x, l_x = flatten_nodes(nodes)
+    id_to_xyz, node_side_hint, r_x, l_x = flatten_nodes(nodes)
     right_is_pos_x = infer_right_is_positive_x(r_x, l_x)
-    print(f"Right is positive x? {right_is_pos_x}")
+    print(f"Right is positive x? {right_is_pos_x} (from explicit R/L hints if available)")
 
     segs = parse_patient_features(features)
     print(f"Parsed {len(segs)} raw feature segments (pre-filter).")
 
-    parts = compute_present_parts(segs)
-    if parts["has_A_parts"]:
-        print("Detected A1/A2 in raw data -> will ignore ACA whole-vessel entries.")
-    if parts["has_P_parts"]:
-        print("Detected P1/P2 in raw data -> will ignore PCA whole-vessel entries.")
-    if parts["has_ICA_parts"]:
-        print("Detected C6/C7 in raw data -> will ignore ICA whole-vessel entries.")
+    fb_map = build_firstblood_mapping()
 
-    # patient geometry keyed by (side, canon)
-    patient_geom: Dict[Tuple[Optional[str], str], Dict[str, Any]] = {}
+    # Keep only segments that are canonical (strict) OR BA/Acom/Pcom etc.
+    candidates: List[Dict[str, Any]] = []
     skipped: List[Dict[str, Any]] = []
 
     for s in segs:
         canon = normalize_segment_name(s["raw_name"])
 
-        if should_skip_canon(canon, parts):
+        # Strict: only keep segments we can map (plus BA/Acom which are side=None)
+        # Everything else becomes "unmapped patient keys"
+        if canon not in CANONICAL:
+            candidates.append({**s, "canon": canon, "side": None, "reason": "noncanonical_ignored_for_mapping"})
             continue
 
-        # We only inject a safe subset into Abel_ref2 CoW mapping
-        # Skip labels we don't map (like ACA/PCA/ICA/C6/C7 unless you later add mapping)
-        # This prevents accidental wrong-span injections.
-        if canon in {"ACA", "PCA", "ICA", "C6", "C7"}:
-            continue
-
-        side = side_from_endpoints(id_to_xyz, s["start_id"], s["end_id"], right_is_pos_x)
+        side = side_from_endpoints(id_to_xyz, node_side_hint, s["start_id"], s["end_id"], right_is_pos_x)
 
         length_m = float(s["length_mm"]) / 1000.0
         diameter_m = (2.0 * float(s["radius_mm"])) / 1000.0
@@ -537,36 +589,42 @@ def main():
         if canon in {"BA", "Acom"}:
             key = (None, canon)
         else:
+            if side is None:
+                skipped.append({
+                    "Reason": "side_unknown_for_side_specific_vessel",
+                    "raw_name": s["raw_name"],
+                    "canon": canon,
+                    "start_id": s["start_id"],
+                    "end_id": s["end_id"],
+                    "length_mm": s["length_mm"],
+                    "radius_mm": s["radius_mm"],
+                })
+                continue
             key = (side, canon)
 
-        # Side required but unknown -> log and skip
-        if canon not in {"BA", "Acom"} and side is None:
-            skipped.append({
-                "Reason": "side_unknown",
-                "raw_name": s["raw_name"],
-                "canon": canon,
-                "start_id": s["start_id"],
-                "end_id": s["end_id"],
-                "length_mm": s["length_mm"],
-                "radius_mm": s["radius_mm"],
-            })
+        candidates.append({
+            "key": key,
+            "raw_name": s["raw_name"],
+            "canon": canon,
+            "side": side,
+            "start_id": s["start_id"],
+            "end_id": s["end_id"],
+            "length_m": length_m,
+            "diameter_m": diameter_m,
+        })
+
+    # Build patient_geom by selecting ONE best candidate per (side, canon)
+    # Selection rule: choose the candidate with the LARGEST length (stable, but per side+canon only)
+    patient_geom: Dict[Tuple[Optional[str], str], Dict[str, Any]] = {}
+    for c in candidates:
+        if "key" not in c:
             continue
+        key = c["key"]
+        if key not in patient_geom or float(c["length_m"]) > float(patient_geom[key]["length_m"]):
+            patient_geom[key] = c
 
-        # Keep the longest (simple, stable). If you later want, we can replace with sum/weighted mean.
-        if key not in patient_geom or length_m > patient_geom[key]["length_m"]:
-            patient_geom[key] = {
-                "length_m": length_m,
-                "diameter_m": diameter_m,
-                "raw_name": s["raw_name"],
-                "start_id": s["start_id"],
-                "end_id": s["end_id"],
-                "side": side,
-                "canon": canon,
-            }
-
-    print(f"Kept {len(patient_geom)} injectable entries after filtering.")
-    if skipped:
-        print(f"Skipped {len(skipped)} segments due to unknown side (logged).")
+    print(f"Kept {len(patient_geom)} unique (side, canon) geometry entries.")
+    print(f"Skipped (side unknown): {len(skipped)}")
     print("-" * 78)
 
     # Prepare output folder
@@ -576,37 +634,32 @@ def main():
         shutil.rmtree(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    # Copy ALL csv from template except arterial.csv
     template_arterial = template_dir / "arterial.csv"
     if not template_arterial.exists():
         raise FileNotFoundError(f"Missing arterial.csv in template: {template_arterial}")
 
+    # Copy ALL template csv except arterial.csv
     for src in template_dir.glob("*.csv"):
         if src.name == "arterial.csv":
             continue
         shutil.copy(src, out_dir / src.name)
 
-    # Load arterial template and inject
+    # Load arterial template
     df = pd.read_csv(template_arterial)
     assert_arterial_schema(df)
-
-    fb_map = build_firstblood_mapping()
 
     modifications: List[Dict[str, Any]] = []
     missing: List[Dict[str, Any]] = []
     unmapped_patient_keys: List[Dict[str, Any]] = []
-    variant_conflicts: List[Dict[str, Any]] = []
 
-    # Track which patient keys are "measured present"
-    measured_present_keys = set(patient_geom.keys())
-
-    # BA split
+    # Inject BA (split)
     ba_key = (None, "BA")
-    if ba_key in patient_geom and ba_key in fb_map:
+    if ba_key in patient_geom:
         fb_ids = fb_map[ba_key]
-        total_len = patient_geom[ba_key]["length_m"]
-        diam = patient_geom[ba_key]["diameter_m"]
+        total_len = float(patient_geom[ba_key]["length_m"])
+        diam = float(patient_geom[ba_key]["diameter_m"])
         split_lens = split_length_by_template(df, fb_ids, total_len)
+
         for fb_id, L in zip(fb_ids, split_lens):
             mod = apply_geometry(df, fb_id, L, diam)
             if mod:
@@ -615,66 +668,58 @@ def main():
             else:
                 missing.append({"Patient_key": "BA", "FirstBlood_ID": fb_id, "Reason": "ID not found in arterial.csv"})
 
-    # Inject other segments
+    # Inject everything else
     for (side, canon), g in patient_geom.items():
         if canon == "BA":
             continue
-        map_key = (None, canon) if canon == "Acom" else (side, canon)
 
+        map_key = (None, canon) if canon == "Acom" else (side, canon)
         pk = canon if side is None else f"{side}_{canon}"
+
         if map_key not in fb_map:
             unmapped_patient_keys.append({"Patient_key": pk, "Reason": "no_mapping_in_fb_map", "raw_name": g.get("raw_name")})
             continue
 
         for fb_id in fb_map[map_key]:
-            mod = apply_geometry(df, fb_id, g["length_m"], g["diameter_m"])
+            mod = apply_geometry(df, fb_id, float(g["length_m"]), float(g["diameter_m"]))
             if mod:
                 mod.update({"Patient_key": pk, "Split_mode": ""})
                 modifications.append(mod)
             else:
                 missing.append({"Patient_key": pk, "FirstBlood_ID": fb_id, "Reason": "ID not found in arterial.csv"})
 
-    # Absent vessel policy (variants -> occlusion), but measured overrides variants
-    absent_keys = extract_absent_variant_keys(variants)
+    # Absent vessel policy (STRICT)
+    absent_keys, ignored_variant_keys = extract_absent_variant_keys(variants)
     min_absent_diam_m = float(args.min_absent_diameter_mm) / 1000.0
 
-    if absent_keys:
-        for akey in absent_keys:
-            # if we measured it, do NOT occlude; log conflict
-            if akey in measured_present_keys:
-                variant_conflicts.append({
-                    "Patient_key": f"{akey[0]}_{akey[1]}" if akey[0] else akey[1],
-                    "Reason": "variant_absent_but_measured_present",
-                })
-                continue
+    variant_conflicts: List[Dict[str, Any]] = []
 
-            if akey not in fb_map:
-                modifications.append({
-                    "Action": "absent_flag_unmapped",
-                    "FirstBlood_ID": "",
-                    "Name": "",
-                    "Old_length_mm": "",
-                    "New_length_mm": "",
-                    "Old_diameter_mm": "",
-                    "New_diameter_mm": "",
-                    "Old_end_diameter_mm": "",
-                    "New_end_diameter_mm": "",
-                    "Patient_key": f"{akey[0]}_{akey[1]}" if akey[0] else akey[1],
-                    "Split_mode": "",
-                })
-                continue
+    # Build set of measured keys we actually have (so "measured beats variants")
+    measured_keys = set(patient_geom.keys())
 
-            for fb_id in fb_map[akey]:
-                oc = occlude_vessel(df, fb_id, min_diameter_m=min_absent_diam_m)
-                if oc:
-                    oc.update({"Patient_key": f"{akey[0]}_{akey[1]}" if akey[0] else akey[1], "Split_mode": ""})
-                    modifications.append(oc)
-                else:
-                    missing.append({
-                        "Patient_key": f"{akey[0]}_{akey[1]}" if akey[0] else akey[1],
-                        "FirstBlood_ID": fb_id,
-                        "Reason": "ID not found in arterial.csv (absent occlusion)",
-                    })
+    for akey in absent_keys:
+        pk = akey[1] if akey[0] is None else f"{akey[0]}_{akey[1]}"
+
+        # If measured exists -> conflict, do NOT occlude
+        if akey in measured_keys:
+            variant_conflicts.append({
+                "Patient_key": pk,
+                "Reason": "variant_marks_absent_but_measured_exists",
+            })
+            continue
+
+        if akey not in fb_map:
+            # should be rare due to whitelist, but keep safe
+            ignored_variant_keys.append({"group": "anterior/posterior", "key": pk, "reason": "absent_key_not_in_fb_map"})
+            continue
+
+        for fb_id in fb_map[akey]:
+            oc = occlude_vessel(df, fb_id, min_diameter_m=min_absent_diam_m)
+            if oc:
+                oc.update({"Patient_key": pk, "Split_mode": ""})
+                modifications.append(oc)
+            else:
+                missing.append({"Patient_key": pk, "FirstBlood_ID": fb_id, "Reason": "ID not found in arterial.csv (absent occlusion)"})
 
     # Save outputs
     df.to_csv(out_dir / "arterial.csv", index=False)
@@ -683,6 +728,7 @@ def main():
     pd.DataFrame(missing).to_csv(out_dir / "missing_mapping_log.csv", index=False)
     pd.DataFrame(skipped).to_csv(out_dir / "skipped_segments_log.csv", index=False)
     pd.DataFrame(unmapped_patient_keys).to_csv(out_dir / "unmapped_patient_keys_log.csv", index=False)
+    pd.DataFrame(ignored_variant_keys).to_csv(out_dir / "variant_ignored_keys_log.csv", index=False)
     pd.DataFrame(variant_conflicts).to_csv(out_dir / "variant_conflicts_log.csv", index=False)
 
     print("Injection complete.")
@@ -690,22 +736,16 @@ def main():
     print(f"Missing mappings:                  {len(missing)}")
     print(f"Skipped segments (side unknown):   {len(skipped)}")
     print(f"Unmapped patient keys:             {len(unmapped_patient_keys)}")
+    print(f"Ignored variant keys:              {len(ignored_variant_keys)}")
     print(f"Variant conflicts (measured wins): {len(variant_conflicts)}")
 
     if absent_keys:
         print("-" * 78)
         print("ABSENT VESSEL POLICY APPLIED (occlusion):")
-        print("  groups used: anterior, posterior")
-        print(f"  absent keys flagged: {len(absent_keys)}")
-        print(f"  occlusion diameter:  {args.min_absent_diameter_mm} mm")
+        print(f"  absent keys flagged (strict): {len(absent_keys)}")
+        print(f"  occlusion diameter:           {args.min_absent_diameter_mm} mm")
         for k in absent_keys:
             print(f"  - {k}")
-
-    if variant_conflicts:
-        print("-" * 78)
-        print("VARIANT CONFLICTS (not occluded because measured present):")
-        for c in variant_conflicts:
-            print(f"  - {c['Patient_key']}")
 
     print("-" * 78)
     print("Model folder created:")
