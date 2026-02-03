@@ -482,12 +482,20 @@ def main():
         epilog="""
 Examples:
     python3 validation.py --model patient_025
-    python3 validation.py --model Abel_ref2
+    python3 validation.py --models patient_025,patient_026
+    python3 validation.py --models-file ./patients.txt
+    python3 validation.py --all
     python3 validation.py --model patient_025 --output-dir ./my_output
         """
     )
-    parser.add_argument('--model', required=True, 
-                       help='Model name (e.g., patient_025, Abel_ref2)')
+    parser.add_argument('--model',
+                       help='Single model name (e.g., patient_025, Abel_ref2)')
+    parser.add_argument('--models',
+                       help='Comma-separated model names (e.g., patient_025,patient_026)')
+    parser.add_argument('--models-file',
+                       help='Path to text file with one model name per line')
+    parser.add_argument('--all', action='store_true',
+                       help='Validate all models found in results directory')
     parser.add_argument('--results-base', default=None, 
                        help='Results base directory (default: projects/simple_run/results)')
     parser.add_argument('--output-dir', default=None,
@@ -502,69 +510,108 @@ Examples:
     
     output_dir.mkdir(parents=True, exist_ok=True)
     
-    model_name = args.model
-    model_results = results_base / model_name / "arterial"
-    
-    # Check if results exist
-    if not model_results.exists():
-        print(f"[ERROR] Results not found: {model_results}")
-        print(f"\nPlease run simulation first:")
-        print(f"  cd ~/first_blood/projects/simple_run")
-        print(f"  ./simple_run.out {model_name}")
-        sys.exit(1)
-    
-    print("="*70)
-    print(f"VALIDATION FOR: {model_name}")
-    print("="*70)
-    print(f"Results directory: {model_results}")
-    print(f"Output directory:  {output_dir}")
-    
-    # Run validation
-    validator = SimulationValidator(model_name, results_base)
-    validator.run_all()
-    
-    # Get summary
-    summary = validator.get_summary()
-    
-    # Print summary
-    print("\n" + "="*70)
-    print("VALIDATION SUMMARY")
-    print("="*70)
-    
-    if summary['overall_status'] == 'PASS':
-        print(f"\n[PASS] All validation checks passed for {model_name}")
-    else:
-        print(f"\n[WARNING] Issues found for {model_name}:")
-        for issue in summary['issues']:
-            print(f"  - {issue}")
-    
-    # Save results
-    output_file = output_dir / f"{model_name}_validation.json"
-    
-    # Convert numpy types for JSON serialization
-    def convert_numpy(obj):
-        if isinstance(obj, np.ndarray):
-            return obj.tolist()
-        elif isinstance(obj, (np.float32, np.float64)):
-            return float(obj)
-        elif isinstance(obj, (np.int32, np.int64)):
-            return int(obj)
-        elif isinstance(obj, (np.bool_,)):
-            return bool(obj)
-        elif isinstance(obj, dict):
-            return {k: convert_numpy(v) for k, v in obj.items()}
-        elif isinstance(obj, list):
-            return [convert_numpy(i) for i in obj]
-        return obj
-    
-    summary_json = convert_numpy(summary)
-    
-    with open(output_file, 'w') as f:
-        json.dump(summary_json, f, indent=2)
-    
-    print(f"\n[OK] Results saved: {output_file}")
-    
-    return 0 if summary['overall_status'] == 'PASS' else 1
+    # Resolve model list (interactive prompt if none provided)
+    model_names = []
+    if args.model:
+        model_names.append(args.model)
+    if args.models:
+        model_names.extend([m.strip() for m in args.models.split(',') if m.strip()])
+    if args.models_file:
+        models_file = Path(args.models_file)
+        if not models_file.exists():
+            print(f"[ERROR] models-file not found: {models_file}")
+            sys.exit(1)
+        with open(models_file, 'r') as f:
+            model_names.extend([line.strip() for line in f if line.strip()])
+    if args.all:
+        if results_base.exists():
+            model_names.extend([p.name for p in results_base.iterdir() if p.is_dir()])
+
+    # De-duplicate while preserving order
+    seen = set()
+    model_names = [m for m in model_names if not (m in seen or seen.add(m))]
+
+    if not model_names:
+        try:
+            entered = input("Enter model name (e.g., patient_025): ").strip()
+        except EOFError:
+            entered = ""
+        if entered:
+            model_names.append(entered)
+        else:
+            print("[ERROR] No models specified. Use --model, --models, --models-file, or --all.")
+            sys.exit(1)
+
+    overall_exit = 0
+
+    for model_name in model_names:
+        model_results = results_base / model_name / "arterial"
+
+        # Check if results exist
+        if not model_results.exists():
+            print("="*70)
+            print(f"VALIDATION FOR: {model_name}")
+            print("="*70)
+            print(f"[ERROR] Results not found: {model_results}")
+            print(f"\nPlease run simulation first:")
+            print(f"  cd ~/first_blood/projects/simple_run")
+            print(f"  ./simple_run.out {model_name}")
+            overall_exit = 1
+            continue
+
+        print("="*70)
+        print(f"VALIDATION FOR: {model_name}")
+        print("="*70)
+        print(f"Results directory: {model_results}")
+        print(f"Output directory:  {output_dir}")
+
+        # Run validation
+        validator = SimulationValidator(model_name, results_base)
+        validator.run_all()
+
+        # Get summary
+        summary = validator.get_summary()
+
+        # Print summary
+        print("\n" + "="*70)
+        print("VALIDATION SUMMARY")
+        print("="*70)
+
+        if summary['overall_status'] == 'PASS':
+            print(f"\n[PASS] All validation checks passed for {model_name}")
+        else:
+            print(f"\n[WARNING] Issues found for {model_name}:")
+            for issue in summary['issues']:
+                print(f"  - {issue}")
+            overall_exit = 1
+
+        # Save results
+        output_file = output_dir / f"{model_name}_validation.json"
+
+        # Convert numpy types for JSON serialization
+        def convert_numpy(obj):
+            if isinstance(obj, np.ndarray):
+                return obj.tolist()
+            elif isinstance(obj, (np.float32, np.float64)):
+                return float(obj)
+            elif isinstance(obj, (np.int32, np.int64)):
+                return int(obj)
+            elif isinstance(obj, (np.bool_,)):
+                return bool(obj)
+            elif isinstance(obj, dict):
+                return {k: convert_numpy(v) for k, v in obj.items()}
+            elif isinstance(obj, list):
+                return [convert_numpy(i) for i in obj]
+            return obj
+
+        summary_json = convert_numpy(summary)
+
+        with open(output_file, 'w') as f:
+            json.dump(summary_json, f, indent=2)
+
+        print(f"\n[OK] Results saved: {output_file}")
+
+    return overall_exit
 
 
 if __name__ == '__main__':
