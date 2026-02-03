@@ -1,0 +1,90 @@
+{
+  "model": "patient_025",
+  "timestamp": "2026-02-03T13:20:04.449092",
+  "validation_results": {
+    "cardiac_output": {
+      "value_l_min": 4.729103189590904,
+      "status": "PASS"
+    },
+    "cow_balance": {
+      "total_inflow_ml_min": 0.610123850228586,
+      "total_outflow_ml_min": 0.3329093160666499,
+      "imbalance_ml_min": 0.27721453416193603,
+      "imbalance_percent": 45.43578063012554,
+      "status": "LARGE",
+      "inflow_vessels": {
+        "R-ICA": 0.3111449823964533,
+        "L-ICA": 0.2703187806843268,
+        "Basilar": 0.02866008714780586
+      },
+      "outflow_vessels": {
+        "R-MCA": 0.08303336413917661,
+        "L-MCA": 0.08280791175246732,
+        "R-ACA": 0.042796070981819104,
+        "L-ACA": 0.04281298549144302,
+        "R-PCA": 0.042681868133723544,
+        "L-PCA": 0.038777115568020326
+      }
+    },
+    "periodicity": "PASS",
+    "pressure_ranges": "FAIL",
+    "pressure_summary": [
+      {
+        "Vessel": "Ascending Aorta",
+        "ID": "A1",
+        "Systolic_mmHg": 116.84770705509965,
+        "Diastolic_mmHg": 0.0,
+        "Mean_mmHg": 88.07936556464249,
+        "Pulse_mmHg": 116.84770705509965,
+        "Valid": false
+      },
+      {
+        "Vessel": "R Internal Carotid",
+        "ID": "A12",
+        "Systolic_mmHg": 118.83110064355472,
+        "Diastolic_mmHg": 0.0,
+        "Mean_mmHg": 87.83684476380724,
+        "Pulse_mmHg": 118.83110064355472,
+        "Valid": false
+      },
+      {
+        "Vessel": "L Internal Carotid",
+        "ID": "A16",
+        "Systolic_mmHg": 119.11664991524276,
+        "Diastolic_mmHg": 0.0,
+        "Mean_mmHg": 87.56063260822023,
+        "Pulse_mmHg": 119.11664991524276,
+        "Valid": false
+      },
+      {
+        "Vessel": "R Middle Cerebral",
+        "ID": "A70",
+        "Systolic_mmHg": 117.5286899386448,
+        "Diastolic_mmHg": -0.006263032357798434,
+        "Mean_mmHg": 86.83206012615743,
+        "Pulse_mmHg": 117.5349529710026,
+        "Valid": false
+      },
+      {
+        "Vessel": "L Middle Cerebral",
+        "ID": "A73",
+        "Systolic_mmHg": 117.6109719326143,
+        "Diastolic_mmHg": -0.004230359580552997,
+        "Mean_mmHg": 86.67431329598661,
+        "Pulse_mmHg": 117.61520229219485,
+        "Valid": false
+      }
+    ],
+    "negative_values": "PASS",
+    "oscillations": "PASS"
+  },
+  "issues": [
+    "CoW imbalance 45.4%",
+    "Ascending Aorta: Pressure out of range",
+    "R Internal Carotid: Pressure out of range",
+    "L Internal Carotid: Pressure out of range",
+    "R Middle Cerebral: Pressure out of range",
+    "L Middle Cerebral: Pressure out of range"
+  ],
+  "overall_status": "WARNING"
+}
