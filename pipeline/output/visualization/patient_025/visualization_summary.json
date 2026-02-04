@@ -1,0 +1,12 @@
+{
+  "model": "patient_025",
+  "output_directory": "/home/maryyds/first_blood/pipeline/output/visualization/patient_025",
+  "figures_generated": [
+    "figure1",
+    "figure2"
+  ],
+  "files": {
+    "figure1": "/home/maryyds/first_blood/pipeline/output/visualization/patient_025/figure1_temporal_history.png",
+    "figure2": "/home/maryyds/first_blood/pipeline/output/visualization/patient_025/figure2_heart_dynamics.png"
+  }
+}

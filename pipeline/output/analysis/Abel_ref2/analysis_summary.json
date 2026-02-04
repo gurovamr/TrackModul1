@@ -1,0 +1,11 @@
+{
+  "temporal_history": "/home/maryyds/first_blood/pipeline/output/analysis/Abel_ref2/temporal_history.png",
+  "heart_dynamics": "/home/maryyds/first_blood/pipeline/output/analysis/Abel_ref2/heart_dynamics.png",
+  "waveform_characteristics": {
+    "systolic_mmHg": 117.39551611887009,
+    "diastolic_mmHg": 63.88015481315915,
+    "pulse_pressure_mmHg": 53.51536130571094,
+    "mean_pressure_mmHg": 88.6326555414553,
+    "periodicity_rms_percent": 27.782776318932108
+  }
+}

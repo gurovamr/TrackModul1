@@ -1,0 +1,11 @@
+{
+  "temporal_history": "/home/maryyds/first_blood/pipeline/output/analysis/patient_025/temporal_history.png",
+  "heart_dynamics": "/home/maryyds/first_blood/pipeline/output/analysis/patient_025/heart_dynamics.png",
+  "waveform_characteristics": {
+    "systolic_mmHg": 116.92597620797763,
+    "diastolic_mmHg": 63.241325512668624,
+    "pulse_pressure_mmHg": 53.684650695309,
+    "mean_pressure_mmHg": 88.05432086852257,
+    "periodicity_rms_percent": 28.046804907720585
+  }
+}
